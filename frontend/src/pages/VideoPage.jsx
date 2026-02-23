@@ -163,7 +163,20 @@ export default function VideoPage(){
     unlock: `ps_video_unlock_v1:${accountKey}`,
   }), [accountKey]);
 
-  const [photoSlots, setPhotoSlots] = React.useState(() => Array(9).fill(""));
+  
+  // When account changes, force re-hydration BEFORE any persist writes,
+  // otherwise the initial "guest" render may wipe the real user's storage.
+  React.useEffect(() => {
+    didHydrateRef.current = false;
+    hydratedForAccountRef.current = null;
+    // Optional: clear UI quickly (prevents showing previous account for a frame)
+    setPhotoSlots(Array(9).fill(""));
+    setActivePhotoIdx(0);
+    setClipSlots(Array(9).fill(""));
+    setActiveClipIdx(0);
+    setStatus("");
+  }, [accountKey]);
+const [photoSlots, setPhotoSlots] = React.useState(() => Array(9).fill(""));
   const [clipSlots, setClipSlots] = React.useState(() => Array(9).fill(""));
   const [activePhotoIdx, setActivePhotoIdx] = React.useState(0);
 const [photoZoomOpen, setPhotoZoomOpen] = React.useState(false);
@@ -195,7 +208,9 @@ const zoomSrc = sanitizePersistentUrl(photoSlots[activePhotoIdx]) ? resolveAsset
   const [unlockCode, setUnlockCode] = React.useState("");
 
   const didHydrateRef = React.useRef(false);
-  const didAutoImportRef = React.useRef(false);
+  
+  const hydratedForAccountRef = React.useRef(null);
+const didAutoImportRef = React.useRef(false);
   const uploadingRef = React.useRef(false);
   const photoFileRef = React.useRef(null);
   const clipFileRef = React.useRef(null);
@@ -234,6 +249,7 @@ React.useEffect(() => {
       setUnlocks(un);
     }
     didHydrateRef.current = true;
+      hydratedForAccountRef.current = accountKey;
   }, [KEY.photo, KEY.clips, KEY.state, KEY.unlock]);
 
   // auto-import from Lookbook on entry (if coming from Lookbook /video?mode=...)
@@ -647,7 +663,71 @@ React.useEffect(() => {
             <button
               className={`videoBtn primary ${isEngineLocked?"disabled":""}`}
               disabled={isEngineLocked}
-              onClick={() => setStatus("Генерация видео будет подключена следующим шагом. Пока доступны загрузка клипов и ffmpeg-объединение.")}
+              onClick={async () => {
+                  try {
+                    if (isEngineLocked) return;
+                    setStatus("Запуск генерации…");
+                    const srcs = (engine === "STANDARD")
+                      ? [sanitizePersistentUrl(photoSlots[activePhotoIdx])].filter(Boolean)
+                      : photoSlots.map(sanitizePersistentUrl).filter(Boolean).slice(0, 3);
+
+                    if (!srcs.length) {
+                      setStatus("Нет исходного фото. Добавь хотя бы 1 кадр (для CINEMA можно до 3).");
+                      return;
+                    }
+
+                    const lighting = (light === "Контраст" ? "contrast" : (light === "Тёплый" ? "warm" : "soft"));
+
+                    const payload = {
+                      engine,
+                      sourceImages: srcs,
+                      format,
+                      seconds: duration,
+                      camera: camera,
+                      lighting,
+                      prompt: "Realistic sportswear studio shoot, natural movement, soft light, no text.",
+                      count: 1
+                    };
+
+                    const res = await fetchJson("/api/video/generate", {
+                      method: "POST",
+                      body: payload,
+                    });
+
+                    const urls = (res && res.videos) ? res.videos : [];
+                    if (!urls.length) {
+                      setStatus("Генерация завершилась без результата (videos пустой).");
+                      return;
+                    }
+
+                    setClipSlots(prev => {
+                      const next = [...prev];
+                      let putAt = next.findIndex(x => !sanitizePersistentUrl(x));
+                      if (putAt < 0) putAt = activeClipIdx;
+                      for (const u of urls) {
+                        if (putAt >= next.length) break;
+                        next[putAt] = u;
+                        putAt += 1;
+                      }
+                      return next;
+                    });
+
+                    setStatus(`Готово: ${urls.length} клип(а). Можно объединять справа.`);
+                  } catch (e) {
+                    // backend may return: {detail}, {data:{detail}}, Error(message), etc.
+                    const detail =
+                      (e && (e.detail ?? e.data?.detail ?? e.response?.detail)) ??
+                      (e && (e.message ?? e.data?.message)) ??
+                      e;
+                    let msg = "";
+                    try {
+                      msg = typeof detail === "string" ? detail : JSON.stringify(detail);
+                    } catch {
+                      msg = String(detail);
+                    }
+                    setStatus(`Ошибка генерации: ${msg}`);
+                  }
+                }}
             >
               {isEngineLocked ? "НЕДОСТУПНО (🔒)" : `СДЕЛАТЬ ВИДЕО • ${cost} кр`}
             </button>

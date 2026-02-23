@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 
@@ -44,6 +44,29 @@ def load_env_value(name: str) -> str:
     return ""
 
 
+
+def _try_read_local_static_asset(url: str) -> tuple[Optional[bytes], Optional[str]]:
+    """If url points to our own /static/assets/... file, read it from disk to avoid self-HTTP deadlocks."""
+    try:
+        u = urlparse(url)
+        p = (u.path or "").lstrip("/")
+        if not p.startswith("static/assets/"):
+            return None, None
+        filename = p.split("static/assets/", 1)[1]
+        if not filename:
+            return None, None
+        assets_dir = Path(__file__).resolve().parents[1] / "static" / "assets"
+        fpath = (assets_dir / filename).resolve()
+        # safety: ensure it's under assets_dir
+        if assets_dir.resolve() not in fpath.parents and fpath != assets_dir.resolve():
+            return None, None
+        if not fpath.exists() or not fpath.is_file():
+            return None, None
+        ext = fpath.suffix.lstrip(".").lower() or None
+        return fpath.read_bytes(), ext
+    except Exception:
+        return None, None
+
 def _download_image_from_source(source_image: str) -> tuple[bytes, str]:
     src = (source_image or "").strip()
     if not src:
@@ -66,6 +89,10 @@ def _download_image_from_source(source_image: str) -> tuple[bytes, str]:
             raise ValueError("Invalid source_image dataUrl") from exc
 
     if src.startswith("http://") or src.startswith("https://"):
+        b, ext_local = _try_read_local_static_asset(src)
+        if b is not None:
+            return b, (ext_local or "jpg")
+
         resp = requests.get(src, timeout=30)
         resp.raise_for_status()
         ctype = (resp.headers.get("content-type") or "").lower()
@@ -80,6 +107,20 @@ def _download_image_from_source(source_image: str) -> tuple[bytes, str]:
 
     raise ValueError("source_image must be dataUrl or http(s) url")
 
+def _download_reference_images(sources: list[str]) -> list[dict]:
+    """Download up to 3 images and convert to Veo referenceImages entries (inlineData)."""
+    out: list[dict] = []
+    for src in (sources or [])[:3]:
+        b, ext = _download_image_from_source(src)
+        mime_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
+        mime = mime_map.get((ext or "").lower(), "image/jpeg")
+        out.append(
+            {
+                "image": {"inlineData": {"mimeType": mime, "data": base64.b64encode(b).decode("utf-8")}},
+                "referenceType": "asset",
+            }
+        )
+    return out
 
 def _download_file(url: str) -> bytes:
     resp = requests.get(url, timeout=120)
@@ -341,23 +382,36 @@ def _extract_task_status(data: dict) -> str:
     return "pending"
 
 
-def _veo_request(image_bytes: bytes, image_ext: str, fmt: str, prompt: str, seconds: int, api_key: str) -> tuple[bytes, Optional[bytes]]:
+def _veo_request(
+    image_bytes: Optional[bytes],
+    image_ext: str,
+    fmt: str,
+    prompt: str,
+    seconds: int,
+    api_key: str,
+    reference_sources: Optional[list[str]] = None,
+) -> tuple[bytes, Optional[bytes]]:
+    """
+    Gemini Veo predictLongRunning.
+
+    Supports:
+    - image-to-video: pass image_bytes
+    - reference-to-video (up to 3 refs): pass reference_sources (list of dataUrl/http urls)
+      See: https://ai.google.dev/gemini-api/docs/video (referenceImages)
+    """
     aspect_ratio = fmt if fmt in {"9:16", "1:1", "16:9"} else "9:16"
     base_url = os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
     predict_url = f"{base_url}/models/veo-3.1-generate-preview:predictLongRunning"
 
     mime_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
-    image_mime = mime_map.get((image_ext or "").lower(), "image/png")
-    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    image_mime = mime_map.get((image_ext or "").lower(), "image/jpeg")
 
-    payload = {
+    # Build payload in the Vertex-style predictLongRunning format.
+    # For reference images, Gemini docs use parameters.referenceImages with inlineData.
+    payload: dict = {
         "instances": [
             {
                 "prompt": prompt,
-                "image": {
-                    "mimeType": image_mime,
-                    "bytesBase64Encoded": image_b64,
-                },
             }
         ],
         "parameters": {
@@ -366,6 +420,21 @@ def _veo_request(image_bytes: bytes, image_ext: str, fmt: str, prompt: str, seco
             "sampleCount": 1,
         },
     }
+
+    reference_images = _download_reference_images(reference_sources or []) if reference_sources else []
+    if reference_images:
+        # Per docs: durationSeconds must be 8 when using referenceImages.
+        if seconds != 8:
+            raise RuntimeError(f"VEO_REF_DURATION_INVALID: durationSeconds must be 8 when using referenceImages; got {seconds}")
+        payload["parameters"]["referenceImages"] = reference_images
+    else:
+        # Back-compat: image-to-video (single start image) using instances.image
+        if image_bytes:
+            payload["instances"][0]["image"] = {
+                "mimeType": image_mime,
+                "bytesBase64Encoded": base64.b64encode(image_bytes).decode("utf-8"),
+            }
+
     headers = {
         "x-goog-api-key": api_key,
         "Content-Type": "application/json",
@@ -375,7 +444,6 @@ def _veo_request(image_bytes: bytes, image_ext: str, fmt: str, prompt: str, seco
     resp = requests.post(predict_url, headers=headers, json=payload, timeout=120)
     if resp.status_code >= 400:
         raise RuntimeError(f"Gemini Veo predictLongRunning error {resp.status_code}: {resp.text[:400]}")
-
     created = resp.json()
     operation_name = created.get("name")
     if not isinstance(operation_name, str) or not operation_name.strip():
@@ -397,7 +465,6 @@ def _veo_request(image_bytes: bytes, image_ext: str, fmt: str, prompt: str, seco
             if isinstance(status_json.get("error"), dict):
                 err = status_json.get("error") or {}
                 raise RuntimeError(f"Gemini Veo operation failed: {err.get('message') or str(err)[:400]}")
-
             try:
                 response_obj = status_json.get("response") if isinstance(status_json.get("response"), dict) else {}
                 gvr = response_obj.get("generateVideoResponse") if isinstance(response_obj.get("generateVideoResponse"), dict) else {}
@@ -406,24 +473,17 @@ def _veo_request(image_bytes: bytes, image_ext: str, fmt: str, prompt: str, seco
                     filtered_count = gvr.get("raiMediaFilteredCount") or 0
                     reasons = gvr.get("raiMediaFilteredReasons") if isinstance(gvr.get("raiMediaFilteredReasons"), list) else []
                     first_reason = next((r for r in reasons if isinstance(r, str) and r.strip()), "")
-                    if first_reason:
-                        first_reason = first_reason.strip()[:300]
-                    else:
-                        first_reason = "generatedSamples missing/empty"
+                    first_reason = (first_reason.strip()[:300] if first_reason else "generatedSamples missing/empty")
                     raise RuntimeError(f"VEO_FILTERED: count={filtered_count} reason={first_reason}")
-
                 video_uri = generated_samples[0]["video"]["uri"]
             except RuntimeError:
                 raise
             except Exception as exc:
-                raise RuntimeError(
-                    f"Gemini Veo operation completed but video uri missing: {str(status_json)[:500]}"
-                ) from exc
+                raise RuntimeError(f"Gemini Veo operation completed but video uri missing: {str(status_json)[:500]}") from exc
 
             video_resp = requests.get(video_uri, headers={"x-goog-api-key": api_key}, timeout=180, allow_redirects=True)
             if video_resp.status_code >= 400:
                 raise RuntimeError(f"Gemini Veo video download error {video_resp.status_code}: {video_resp.text[:400]}")
-
             elapsed = int(time.time() - request_start)
             logger.info("Gemini Veo operation completed name=%s elapsed=%ss", operation_name, elapsed)
             return video_resp.content, None
@@ -432,15 +492,29 @@ def _veo_request(image_bytes: bytes, image_ext: str, fmt: str, prompt: str, seco
         time.sleep(max(8, min(12, poll_interval_seconds)))
 
     raise TimeoutError("VIDEO_TIMEOUT")
-
-
 def generate_video(kind: str, source_image: str, fmt: str, model: str, camera: str, prompt: str, seconds: int, lighting: str = "soft") -> dict:
     try:
         job_id = f"job_{int(time.time() * 1000)}"
         if kind != "video_from_image":
             return {"ok": False, "code": "INVALID_KIND", "message": "kind must be 'video_from_image'"}
 
-        image_bytes, image_ext = _download_image_from_source(source_image)
+        # Allow passing multiple reference images for Veo (up to 3).
+        # Frontend may send a JSON array string in source_image, e.g. ["url1","url2","url3"].
+        sources_list: list[str] | None = None
+        if isinstance(source_image, list):
+            sources_list = [str(x) for x in source_image if x]
+        elif isinstance(source_image, str):
+            s = source_image.strip()
+            if s.startswith("[") and s.endswith("]"):
+                try:
+                    arr = json.loads(s)
+                    if isinstance(arr, list):
+                        sources_list = [str(x) for x in arr if x]
+                except Exception:
+                    sources_list = None
+
+        primary_source = (sources_list[0] if sources_list else source_image)
+        image_bytes, image_ext = _download_image_from_source(primary_source)
 
         # Lighting (safe presets)
         lighting_key = (lighting or "soft").strip().lower()
@@ -482,7 +556,15 @@ def generate_video(kind: str, source_image: str, fmt: str, model: str, camera: s
             if not api_key:
                 return {"ok": False, "code": "MISSING_GEMINI_API_KEY", "message": "GEMINI_API_KEY is missing in environment/.env"}
 
-            video_bytes, _ = _veo_request(image_bytes, image_ext, fmt, prompt, seconds, api_key)
+            # If we received multiple sources, use them as Veo referenceImages (up to 3).
+            # Veo referenceImages require durationSeconds=8 in Gemini API docs.
+            ref_sources = sources_list if (sources_list and len(sources_list) > 1) else None
+            effective_seconds = seconds
+            if ref_sources and effective_seconds != 8:
+                # Auto-fix to 8s to keep UI simple (user can still show 5s/10s presets on UI).
+                effective_seconds = 8
+
+            video_bytes, _ = _veo_request(image_bytes if not ref_sources else None, image_ext, fmt, prompt, effective_seconds, api_key, reference_sources=ref_sources)
             video_url, video_path, resolved_job_id = _save_veo_video_locally(video_bytes, job_id=job_id)
             last_frame_url, warning = _extract_last_frame(video_path, int(time.time() * 1000))
             return {
@@ -495,7 +577,7 @@ def generate_video(kind: str, source_image: str, fmt: str, model: str, camera: s
                 "warning": warning,
                 "meta": {
                     "format": fmt,
-                    "seconds": seconds,
+                    "seconds": effective_seconds,
                     "camera": camera,
                     "generated_at": datetime.now(timezone.utc).isoformat(),
                     "file": f"{resolved_job_id}.mp4",
