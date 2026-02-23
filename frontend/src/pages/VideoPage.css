@@ -112,6 +112,8 @@
   border: 1px solid rgba(255,255,255,0.10);
   background: rgba(0,0,0,0.22);
   min-height: 340px;
+  height: min(520px, 62vh);
+
   display:flex;
   align-items:center;
   justify-content:center;
@@ -120,8 +122,10 @@
 }
 
 .slotPreview img{
-  width: 100%;
-  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
   object-fit: contain;
 }
 
@@ -347,6 +351,8 @@
   border: 1px solid rgba(255,255,255,0.10);
   background: rgba(0,0,0,0.22);
   min-height: 340px;
+  height: min(520px, 62vh);
+
   overflow:hidden;
   display:flex;
   align-items:center;
@@ -354,8 +360,10 @@
 }
 
 .videoPlayer video{
-  width: 100%;
-  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
   object-fit: contain;
 }
 
@@ -557,4 +565,41 @@
 
 .glassSelectMenu:hover::-webkit-scrollbar-thumb{
   background: rgba(255,255,255,0.22);
+}
+
+
+/* Photo zoom (preview overlay) */
+.photoZoomOverlay{
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9998;
+  padding: 22px;
+  backdrop-filter: blur(6px);
+}
+.photoZoomImg{
+  max-width: min(1100px, 96vw);
+  max-height: 92vh;
+  width: auto;
+  height: auto;
+  border-radius: 18px;
+  border: 1px solid rgba(255,255,255,0.18);
+  box-shadow: 0 18px 60px rgba(0,0,0,0.55);
+  background: rgba(0,0,0,0.22);
+  object-fit: contain;
+}
+
+
+.photoZoomVideo{
+  max-width: min(1100px, 96vw);
+  max-height: 92vh;
+  width: auto;
+  height: auto;
+  border-radius: 18px;
+  border: 1px solid rgba(255,255,255,0.18);
+  box-shadow: 0 18px 60px rgba(0,0,0,0.55);
+  background: rgba(0,0,0,0.35);
 }

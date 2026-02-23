@@ -24,3 +24,10 @@ Thumbs.db
 .vscode/
 .idea/
 *.log
+
+# local runtime database
+backend/app/app.db
+
+# generated media
+backend/app/static/assets/
+backend/app/static/videos/

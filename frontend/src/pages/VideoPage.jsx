@@ -2,6 +2,7 @@ import React from "react";
 import { fetchJson, API_BASE } from "../services/api.js";
 import { useAuth } from "../app/AuthContext.jsx";
 import "./VideoPage.css";
+import { useLocation } from "react-router-dom";
 
 function GlassSelect({ value, options, onChange, ariaLabel }){
   const [open, setOpen] = React.useState(false);
@@ -98,6 +99,13 @@ function resolveAssetUrl(url){
   return s;
 }
 
+function readModeFromSearch(search){
+  const sp = new URLSearchParams(search || "");
+  const raw = (sp.get("mode") || sp.get("variant") || sp.get("v") || "").trim().toUpperCase();
+  if(raw === "TORSO" || raw === "LEGS" || raw === "FULL") return raw;
+  return "";
+}
+
 async function fileToDataUrl(file){
   return new Promise((resolve, reject) => {
     const r = new FileReader();
@@ -132,6 +140,22 @@ export default function VideoPage(){
   const { user } = useAuth();
   const accountKey = React.useMemo(() => getAccountKey(user), [user]);
 
+  const location = useLocation();
+  const KEY_LAST_MODE = React.useMemo(() => `ps_video_last_mode_v1:${accountKey}`, [accountKey]);
+  const urlMode = React.useMemo(() => readModeFromSearch(location.search), [location.search]);
+  const mode = React.useMemo(() => {
+    let stored = "";
+    try { stored = String(localStorage.getItem(KEY_LAST_MODE) || "").toUpperCase(); } catch {}
+    if(urlMode) return urlMode;
+    if(stored === "TORSO" || stored === "LEGS" || stored === "FULL") return stored;
+    return "FULL";
+  }, [urlMode, KEY_LAST_MODE]);
+
+  React.useEffect(() => {
+    if(!urlMode) return;
+    try { localStorage.setItem(KEY_LAST_MODE, urlMode); } catch {}
+  }, [urlMode, KEY_LAST_MODE]);
+
   const KEY = React.useMemo(() => ({
     photo: `ps_video_photoSlots_v1:${accountKey}`,
     clips: `ps_video_clipSlots_v1:${accountKey}`,
@@ -142,6 +166,20 @@ export default function VideoPage(){
   const [photoSlots, setPhotoSlots] = React.useState(() => Array(9).fill(""));
   const [clipSlots, setClipSlots] = React.useState(() => Array(9).fill(""));
   const [activePhotoIdx, setActivePhotoIdx] = React.useState(0);
+const [photoZoomOpen, setPhotoZoomOpen] = React.useState(false);
+const [videoZoomOpen, setVideoZoomOpen] = React.useState(false);
+React.useEffect(() => {
+  if(!photoZoomOpen && !videoZoomOpen) return;
+  const onKey = (e) => {
+    if(e.key === "Escape"){
+      setPhotoZoomOpen(false);
+      setVideoZoomOpen(false);
+    }
+  };
+  document.addEventListener("keydown", onKey);
+  return () => document.removeEventListener("keydown", onKey);
+}, [photoZoomOpen, videoZoomOpen]);
+const zoomSrc = sanitizePersistentUrl(photoSlots[activePhotoIdx]) ? resolveAssetUrl(photoSlots[activePhotoIdx]) : "";
   const [activeClipIdx, setActiveClipIdx] = React.useState(0);
 
   const [format, setFormat] = React.useState("9:16");
@@ -157,9 +195,18 @@ export default function VideoPage(){
   const [unlockCode, setUnlockCode] = React.useState("");
 
   const didHydrateRef = React.useRef(false);
+  const didAutoImportRef = React.useRef(false);
   const uploadingRef = React.useRef(false);
   const photoFileRef = React.useRef(null);
   const clipFileRef = React.useRef(null);
+
+
+React.useEffect(() => {
+  if(!photoZoomOpen) return;
+  const onKey = (e) => { if(e.key === "Escape") setPhotoZoomOpen(false); };
+  document.addEventListener("keydown", onKey);
+  return () => document.removeEventListener("keydown", onKey);
+}, [photoZoomOpen]);
 
   // hydrate
   React.useEffect(() => {
@@ -188,6 +235,21 @@ export default function VideoPage(){
     }
     didHydrateRef.current = true;
   }, [KEY.photo, KEY.clips, KEY.state, KEY.unlock]);
+
+  // auto-import from Lookbook on entry (if coming from Lookbook /video?mode=...)
+  React.useEffect(() => {
+    if(!didHydrateRef.current) return;
+    if(didAutoImportRef.current) return;
+    didAutoImportRef.current = true;
+
+    // если уже есть фото — не трогаем (пользователь мог загрузить вручную)
+    const hasAny = photoSlots.some((s) => !!sanitizePersistentUrl(s));
+    if(hasAny) return;
+
+    importFromLookbook();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, accountKey]);
+
 
   // persist
   React.useEffect(() => {
@@ -230,22 +292,55 @@ export default function VideoPage(){
   }, [engine, duration]);
 
   async function importFromLookbook(){
-    setStatus("Импортируем кадры из Lookbook…");
+    setStatus(`Импортируем кадры из Lookbook (${mode})…`);
     try{
-      // если в будущем появится endpoint — подхватим.
-      // Пока пытаемся брать из localStorage (старый путь), если есть.
-      const maybe = safeParse(localStorage.getItem(`ps_lastLookbookShots_v1:${accountKey}`) || "", null);
-      if(Array.isArray(maybe) && maybe.length){
-        const next = Array(9).fill("");
-        maybe.slice(0,9).forEach((u, i) => { next[i] = sanitizePersistentUrl(u); });
-        setPhotoSlots(next);
-        setActivePhotoIdx(0);
-        setStatus(`Импортировано кадров: ${maybe.slice(0,9).length}`);
+      // SERVER SOURCE OF TRUTH: берём результаты из backend session
+      const res = await fetch(`${API_BASE}/api/lookbook/session/${mode}`, {
+        method: "GET",
+        credentials: "include",
+      });
+      const data = await res.json().catch(() => null);
+      if(!res.ok){
+        const msg = data?.detail || data?.message || `HTTP ${res.status}`;
+        throw new Error(msg);
+      }
+
+      const arr =
+        (Array.isArray(data?.results) ? data.results : null) ||
+        (Array.isArray(data?.session?.results) ? data.session.results : null) ||
+        (Array.isArray(data?.data?.results) ? data.data.results : null) ||
+        [];
+
+      const urls = arr
+        .map((r) => sanitizePersistentUrl(r?.url || r?.assetUrl || r?.src || r))
+        .filter(Boolean)
+        .slice(0, 9);
+
+      if(!urls.length){
+        setStatus("В Lookbook пока нет результатов для импорта.");
         return;
       }
-      setStatus("Пока нечего импортировать. Загрузите фото вручную.");
+
+      setPhotoSlots(prev => {
+        const next = [...prev];
+        let inserted = 0;
+        for(let i=0; i<9 && inserted<urls.length; i++){
+          if(!sanitizePersistentUrl(next[i])){
+            next[i] = urls[inserted++];
+          }
+        }
+        // если все слоты были заняты, то просто перезапишем первые N (ожидаемое поведение при автоимпорте)
+        if(inserted === 0){
+          urls.forEach((u, i) => { next[i] = u; });
+          inserted = urls.length;
+        }
+        setStatus(`Импортировано кадров: ${inserted}`);
+        return next;
+      });
+      setActivePhotoIdx(0);
     }catch(e){
       setStatus(`Импорт не удался: ${e?.message || e}`);
+      console.warn("Lookbook import failed", e);
     }
   }
 
@@ -430,7 +525,7 @@ export default function VideoPage(){
               </div>
             </div>
 
-            <div className="slotPreview" onClick={() => photoFileRef.current?.click()}>
+            <div className="slotPreview" onClick={() => { if (zoomSrc) setPhotoZoomOpen(true); }}>
               {sanitizePersistentUrl(photoSlots[activePhotoIdx])
                 ? <img src={resolveAssetUrl(photoSlots[activePhotoIdx])} alt="frame" />
                 : <div className="slotEmpty">Фото не выбрано</div>}
@@ -453,14 +548,17 @@ export default function VideoPage(){
                     ) : null}
                     <div className="slotNum">{idx + 1}</div>
                     {ok ? (
-                      <button
-                        type="button"
-                        className="slotX"
-                        title="Удалить кадр"
-                        onClick={(e) => { e.stopPropagation(); deletePhotoSlot(idx); }}
-                      >
-                        ×
-                      </button>
+                      <div
+                role="button"
+                tabIndex={0}
+                className="slotX"
+                title="Удалить кадр"
+                onClick={(e) => { e.preventDefault(); e.stopPropagation(); deletePhotoSlot(idx); } }
+                onKeyDown={(e) => { if(e.key==="Enter"||e.key===" "){ e.preventDefault(); e.stopPropagation(); deletePhotoSlot(idx); } } }
+                aria-label="Удалить кадр"
+              >
+                ×
+              </div>
                     ) : null}
                   </button>
                 );
@@ -568,7 +666,7 @@ export default function VideoPage(){
               <div className="videoCardTitle">Видео</div>
             </div>
 
-            <div className="videoPlayer">
+            <div className="videoPlayer" onDoubleClick={() => { if (sanitizePersistentUrl(clipSlots[activeClipIdx])) setVideoZoomOpen(true); }}>
               {activeClipUrl
                 ? <video src={activeClipUrl} controls />
                 : <div className="slotEmpty">Видео появится здесь</div>}
@@ -599,14 +697,17 @@ export default function VideoPage(){
                     ) : null}
                     <div className="slotNum">{idx + 1}</div>
                     {ok ? (
-                      <button
-                        type="button"
-                        className="slotX"
-                        title="Удалить клип"
-                        onClick={(e) => { e.stopPropagation(); deleteClipSlot(idx); }}
-                      >
-                        ×
-                      </button>
+                      <div
+                role="button"
+                tabIndex={0}
+                className="slotX"
+                title="Удалить клип"
+                onClick={(e) => { e.preventDefault(); e.stopPropagation(); deleteClipSlot(idx); } }
+                onKeyDown={(e) => { if(e.key==="Enter"||e.key===" "){ e.preventDefault(); e.stopPropagation(); deleteClipSlot(idx); } } }
+                aria-label="Удалить клип"
+              >
+                ×
+              </div>
                     ) : null}
                   </button>
                 );
@@ -626,6 +727,26 @@ export default function VideoPage(){
           </div>
         </div>
       </div>
+
+{photoZoomOpen && zoomSrc && (
+  <div className="photoZoomOverlay" onMouseDown={() => setPhotoZoomOpen(false)}>
+    <img className="photoZoomImg" src={zoomSrc} alt="Просмотр" onMouseDown={(e) => e.stopPropagation()} />
+  </div>
+)}
+
+
+{videoZoomOpen && sanitizePersistentUrl(clipSlots[activeClipIdx]) && (
+  <div className="photoZoomOverlay" onMouseDown={() => setVideoZoomOpen(false)}>
+    <video
+      className="photoZoomVideo"
+      src={resolveAssetUrl(clipSlots[activeClipIdx])}
+      controls
+      autoPlay
+      onMouseDown={(e) => e.stopPropagation()}
+    />
+  </div>
+)}
+
 
       {unlockOpen && (
         <div className="unlockOverlay" onMouseDown={() => setUnlockOpen(false)}>
