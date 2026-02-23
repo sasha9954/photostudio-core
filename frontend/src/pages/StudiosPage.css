@@ -1,0 +1,86 @@
+.studGrid{
+  display:grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.studCard{
+  width: 100%;
+  text-align: left;
+  border-radius: 18px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(0,0,0,0.22);
+  overflow: hidden;
+  cursor: pointer;
+  padding: 0;
+}
+
+.studCard:hover{
+  border-color: rgba(255,255,255,0.18);
+  background: rgba(0,0,0,0.26);
+}
+
+.studMedia{
+  height: 160px;
+  background: radial-gradient(120% 120% at 50% 50%, rgba(255,255,255,0.06), rgba(0,0,0,0.30));
+  position: relative;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+
+.studLetter{
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  font-weight: 900;
+  font-size: 26px;
+  color: rgba(255,255,255,0.92);
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(0,0,0,0.22);
+  box-shadow: 0 18px 40px rgba(0,0,0,0.45);
+}
+
+.studInfo{
+  padding: 12px 14px 14px;
+}
+
+.studBadge{
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  font-size: 13px;
+  opacity: 0.92;
+}
+
+.studTitle{
+  margin-top: 4px;
+  font-weight: 900;
+  font-size: 18px;
+  color: rgba(255,255,255,0.92);
+}
+
+.studDesc{
+  margin-top: 4px;
+  color: rgba(255,255,255,0.55);
+  font-size: 13px;
+}
+
+/* Accent badge color */
+.accent-cyan .studBadge{ color: rgba(90,210,255,0.95); }
+.accent-green .studBadge{ color: rgba(90,245,170,0.95); }
+.accent-orange .studBadge{ color: rgba(255,180,90,0.95); }
+.accent-pink .studBadge{ color: rgba(255,120,210,0.95); }
+.accent-violet .studBadge{ color: rgba(180,120,255,0.95); }
+.accent-mint .studBadge{ color: rgba(120,255,230,0.95); }
+.accent-blue .studBadge{ color: rgba(90,130,255,0.95); }
+.accent-indigo .studBadge{ color: rgba(120,120,255,0.95); }
+.accent-red .studBadge{ color: rgba(255,110,110,0.95); }
+.accent-lime .studBadge{ color: rgba(160,255,110,0.95); }
+
+@media (max-width: 920px){
+  .studGrid{ grid-template-columns: 1fr; }
+}

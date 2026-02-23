@@ -1,0 +1,16 @@
+from pydantic_settings import BaseSettings
+
+class Settings(BaseSettings):
+    PS_ENV: str = "dev"
+    SECRET_KEY: str = "dev-secret-change-me"
+    DB_PATH: str = "app/app.db"
+    PUBLIC_BASE_URL: str = "http://127.0.0.1:8000"
+    TOKEN_TTL_SECONDS: int = 60 * 60 * 24 * 14  # 14 days
+
+    # Gemini / Engine
+    GEMINI_API_KEY: str = ""
+    GEMINI_IMAGE_MODEL: str = "gemini-2.5-flash-image"
+    GEMINI_VISION_MODEL: str = "gemini-2.5-flash"
+    ENGINE_DEBUG: bool = False
+
+settings = Settings()
